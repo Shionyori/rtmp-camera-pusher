@@ -8,21 +8,9 @@ lib/
 *.pdb
 *.ilk
 
+# VS Code settings
+.vscode/
+
 # CMake
 CMakeUserPresets.json
 compile_commands.json
-
-# VS Code - Keep settings/launch/tasks but ignore user specific
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/c_cpp_properties.json
-.vscode/*.log
-.history/
-.vs/
-
-# OS specific
-.DS_Store
-Thumbs.db

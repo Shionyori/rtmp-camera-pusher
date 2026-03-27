@@ -1,0 +1,57 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Qt: Windows Debug (Launch)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${env:PATH}"
+                }
+            ],
+            "console": "externalTerminal"
+        },
+        {
+            "name": "Qt: Linux/macOS Debug (Launch)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "LD_LIBRARY_PATH", 
+                    "value": "${env:QT_DIR}/lib:${env:LD_LIBRARY_PATH}"
+                },
+                {
+                    "name": "DYLD_LIBRARY_PATH", 
+                    "value": "${env:QT_DIR}/lib:${env:DYLD_LIBRARY_PATH}"
+                },
+                {
+                    "name": "QT_PLUGIN_PATH",
+                    "value": "${env:QT_DIR}/plugins"
+                },
+                {
+                    "name": "QML2_IMPORT_PATH",
+                    "value": "${env:QT_DIR}/qml"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+}

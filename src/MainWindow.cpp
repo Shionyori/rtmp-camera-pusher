@@ -13,6 +13,9 @@
 #include <QPushButton>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QVideoFrame>
+#include <QVideoFrameFormat>
+#include <QVideoSink>
 #include <QVideoWidget>
 #include <QWidget>
 
@@ -66,6 +69,10 @@ void MainWindow::onStartClicked()
 {
     RtmpStreamer::Config config;
     config.url = m_rtmpUrlEdit->text().trimmed();
+    config.width = 1280;
+    config.height = 720;
+    config.fps = 25;
+    config.bitrateKbps = 2500;
 
     if (m_streamer->start(config)) {
         setStreamingControls(true);
@@ -128,7 +135,7 @@ void MainWindow::setupConnections()
             this, &MainWindow::onStopClicked);
 
     connect(m_streamer, &RtmpStreamer::started, this, [this]() {
-        appendLog("推流启动成功（当前为骨架模式）。");
+        appendLog("推流启动成功。正在发送摄像头帧。");
     });
     connect(m_streamer, &RtmpStreamer::stopped, this, [this]() {
         appendLog("推流已停止。");
@@ -137,6 +144,23 @@ void MainWindow::setupConnections()
             this, &MainWindow::appendLog);
     connect(m_streamer, &RtmpStreamer::infoMessage,
             this, &MainWindow::appendLog);
+
+    QVideoSink* sink = m_videoWidget->videoSink();
+    if (sink != nullptr) {
+        connect(sink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& frame) {
+            if (!m_streamer->isRunning() || !frame.isValid()) {
+                return;
+            }
+
+            QVideoFrame copy(frame);
+            QImage image = copy.toImage();
+            if (image.isNull()) {
+                return;
+            }
+
+            m_streamer->pushFrame(image);
+        });
+    }
 }
 
 void MainWindow::startPreviewForIndex(int index)

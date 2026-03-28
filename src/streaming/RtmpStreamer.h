@@ -1,7 +1,24 @@
 #pragma once
 
 #include <QObject>
+#include <QImage>
 #include <QString>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <thread>
+
+#if defined(HAS_FFMPEG)
+struct AVCodecContext;
+struct AVFormatContext;
+struct AVFrame;
+struct AVPacket;
+struct AVStream;
+struct SwsContext;
+#endif
 
 class RtmpStreamer : public QObject
 {
@@ -21,6 +38,7 @@ public:
 
     bool start(const Config& config);
     void stop();
+    void pushFrame(const QImage& image);
 
     bool isRunning() const;
 
@@ -31,5 +49,31 @@ signals:
     void infoMessage(const QString& message);
 
 private:
-    bool m_running = false;
+    static constexpr std::size_t kMaxQueueSize = 6;
+
+    void workerLoop();
+
+#if defined(HAS_FFMPEG)
+    bool initOutput(const Config& config);
+    void cleanupOutput();
+    bool encodeAndWriteImage(const QImage& image);
+    bool flushEncoder();
+    QString ffmpegError(int code) const;
+
+    AVFormatContext* m_outputCtx = nullptr;
+    AVCodecContext* m_codecCtx = nullptr;
+    AVFrame* m_frame = nullptr;
+    AVPacket* m_packet = nullptr;
+    AVStream* m_videoStream = nullptr;
+    SwsContext* m_swsCtx = nullptr;
+    int64_t m_frameIndex = 0;
+#endif
+
+    Config m_config;
+    std::atomic<bool> m_running { false };
+    std::atomic<bool> m_stopping { false };
+    std::thread m_worker;
+    std::mutex m_queueMutex;
+    std::condition_variable m_queueCv;
+    std::deque<QImage> m_frameQueue;
 };

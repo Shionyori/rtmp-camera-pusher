@@ -1,34 +1,26 @@
-#include "MainWindow.h"
+#include "gui/MainWindow.h"
 
-#include "streaming/RtmpStreamer.h"
+#include "core/StreamSession.h"
 
-#include <QCamera>
-#include <QCameraDevice>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMediaCaptureSession>
-#include <QMediaDevices>
+#include <QPixmap>
 #include <QPushButton>
 #include <QTextEdit>
 #include <QVBoxLayout>
-#include <QVideoFrame>
-#include <QVideoFrameFormat>
-#include <QVideoSink>
-#include <QVideoWidget>
 #include <QWidget>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("Qt RTMP Camera Pusher");
+    setWindowTitle("RTMP Camera Pusher");
     resize(1080, 720);
 
     buildUi();
-
-    m_captureSession = new QMediaCaptureSession(this);
-    m_streamer = new RtmpStreamer(this);
+    m_session = new StreamSession(this);
 
     setupConnections();
     refreshCameraDevices();
@@ -38,31 +30,45 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
-    if (m_streamer != nullptr && m_streamer->isRunning()) {
-        m_streamer->stop();
+    if (m_session != nullptr && m_session->isStreaming()) {
+        m_session->stopStreaming();
     }
 }
 
 void MainWindow::refreshCameraDevices()
 {
-    m_cameraDevices = QMediaDevices::videoInputs();
+    m_session->refreshCameras();
+}
+
+void MainWindow::onCameraListChanged(const QStringList& cameras)
+{
     m_cameraCombo->clear();
+    m_cameraCombo->addItems(cameras);
 
-    for (const auto& device : m_cameraDevices) {
-        m_cameraCombo->addItem(device.description());
-    }
-
-    if (m_cameraDevices.isEmpty()) {
+    if (cameras.isEmpty()) {
         appendLog("未检测到可用摄像头设备。");
         return;
     }
 
-    startPreviewForIndex(0);
+    if (m_cameraCombo->currentIndex() < 0) {
+        m_cameraCombo->setCurrentIndex(0);
+    }
+}
+
+void MainWindow::onPreviewFrameReady(const QImage& frame)
+{
+    if (frame.isNull()) {
+        return;
+    }
+
+    QPixmap pixmap = QPixmap::fromImage(frame);
+    m_previewLabel->setPixmap(
+        pixmap.scaled(m_previewLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
 void MainWindow::onCameraSelectionChanged(int index)
 {
-    startPreviewForIndex(index);
+    m_session->selectCamera(index);
 }
 
 void MainWindow::onStartClicked()
@@ -74,14 +80,14 @@ void MainWindow::onStartClicked()
     config.fps = 25;
     config.bitrateKbps = 2500;
 
-    if (m_streamer->start(config)) {
+    if (m_session->startStreaming(config)) {
         setStreamingControls(true);
     }
 }
 
 void MainWindow::onStopClicked()
 {
-    m_streamer->stop();
+    m_session->stopStreaming();
     setStreamingControls(false);
 }
 
@@ -113,9 +119,12 @@ void MainWindow::buildUi()
 
     rootLayout->addLayout(topBar);
 
-    m_videoWidget = new QVideoWidget(central);
-    m_videoWidget->setMinimumHeight(360);
-    rootLayout->addWidget(m_videoWidget, 1);
+    m_previewLabel = new QLabel(central);
+    m_previewLabel->setMinimumHeight(360);
+    m_previewLabel->setAlignment(Qt::AlignCenter);
+    m_previewLabel->setStyleSheet("background: #111; color: #ddd;");
+    m_previewLabel->setText("等待摄像头画面...");
+    rootLayout->addWidget(m_previewLabel, 1);
 
     m_logView = new QTextEdit(central);
     m_logView->setReadOnly(true);
@@ -134,53 +143,19 @@ void MainWindow::setupConnections()
     connect(m_stopButton, &QPushButton::clicked,
             this, &MainWindow::onStopClicked);
 
-    connect(m_streamer, &RtmpStreamer::started, this, [this]() {
-        appendLog("推流启动成功。正在发送摄像头帧。");
-    });
-    connect(m_streamer, &RtmpStreamer::stopped, this, [this]() {
-        appendLog("推流已停止。");
-    });
-    connect(m_streamer, &RtmpStreamer::errorOccurred,
+    connect(m_session, &StreamSession::cameraListChanged,
+            this, &MainWindow::onCameraListChanged);
+    connect(m_session, &StreamSession::previewFrameReady,
+            this, &MainWindow::onPreviewFrameReady);
+    connect(m_session, &StreamSession::logMessage,
             this, &MainWindow::appendLog);
-    connect(m_streamer, &RtmpStreamer::infoMessage,
-            this, &MainWindow::appendLog);
-
-    QVideoSink* sink = m_videoWidget->videoSink();
-    if (sink != nullptr) {
-        connect(sink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& frame) {
-            if (!m_streamer->isRunning() || !frame.isValid()) {
-                return;
-            }
-
-            QVideoFrame copy(frame);
-            QImage image = copy.toImage();
-            if (image.isNull()) {
-                return;
-            }
-
-            m_streamer->pushFrame(image);
-        });
-    }
+    connect(m_session, &StreamSession::streamingStateChanged,
+            this, &MainWindow::setStreamingControls);
 }
 
 void MainWindow::startPreviewForIndex(int index)
 {
-    if (index < 0 || index >= m_cameraDevices.size()) {
-        return;
-    }
-
-    if (m_camera != nullptr) {
-        m_camera->stop();
-        m_camera->deleteLater();
-        m_camera = nullptr;
-    }
-
-    m_camera = new QCamera(m_cameraDevices.at(index), this);
-    m_captureSession->setCamera(m_camera);
-    m_captureSession->setVideoOutput(m_videoWidget);
-    m_camera->start();
-
-    appendLog(QString("已切换摄像头: %1").arg(m_cameraDevices.at(index).description()));
+    m_session->selectCamera(index);
 }
 
 void MainWindow::setStreamingControls(bool running)

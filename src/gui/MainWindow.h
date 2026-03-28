@@ -1,17 +1,15 @@
 #pragma once
 
+#include <QImage>
 #include <QMainWindow>
-#include <QCameraDevice>
-#include <QList>
+#include <QStringList>
 
-class QCamera;
+class QLabel;
 class QComboBox;
 class QLineEdit;
 class QPushButton;
 class QTextEdit;
-class QMediaCaptureSession;
-class QVideoWidget;
-class RtmpStreamer;
+class StreamSession;
 
 class MainWindow : public QMainWindow
 {
@@ -22,6 +20,8 @@ public:
 
 private slots:
     void refreshCameraDevices();
+    void onCameraListChanged(const QStringList& cameras);
+    void onPreviewFrameReady(const QImage& frame);
     void onCameraSelectionChanged(int index);
     void onStartClicked();
     void onStopClicked();
@@ -38,10 +38,7 @@ private:
     QPushButton* m_startButton = nullptr;
     QPushButton* m_stopButton = nullptr;
     QTextEdit* m_logView = nullptr;
-    QVideoWidget* m_videoWidget = nullptr;
+    QLabel* m_previewLabel = nullptr;
 
-    QList<QCameraDevice> m_cameraDevices;
-    QCamera* m_camera = nullptr;
-    QMediaCaptureSession* m_captureSession = nullptr;
-    RtmpStreamer* m_streamer = nullptr;
+    StreamSession* m_session = nullptr;
 };

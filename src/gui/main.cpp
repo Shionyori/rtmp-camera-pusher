@@ -1,5 +1,9 @@
 #include <QApplication>
-#include "MainWindow.h"
+#include <QByteArray>
+
+#include <clocale>
+
+#include "gui/MainWindow.h"
 
 int main(int argc, char *argv[])
 {

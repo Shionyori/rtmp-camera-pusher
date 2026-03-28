@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-# replace "your_project_name" with the actual name of your project
-set(TARGET_NAME "your_project_name")
+set(TARGET_NAME "qt-rtmp-camera-pusher")
 project(${TARGET_NAME} VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -22,13 +21,20 @@ find_package(Qt6 REQUIRED COMPONENTS
     Core 
     Gui 
     Widgets
+    Multimedia
+    MultimediaWidgets
 )
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
 
 # Add executable and specify source files
 qt_add_executable(${PROJECT_NAME}
     src/main.cpp
     src/MainWindow.cpp
     src/MainWindow.h
+    src/streaming/RtmpStreamer.cpp
+    src/streaming/RtmpStreamer.h
 )
 
 # Link Qt6 libraries to the executable
@@ -36,7 +42,17 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core 
     Qt6::Gui 
     Qt6::Widgets
+    Qt6::Multimedia
+    Qt6::MultimediaWidgets
 )
+
+if(FFMPEG_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::FFMPEG)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_FFMPEG=1)
+    message(STATUS "FFmpeg found. RTMP streaming features enabled.")
+else()
+    message(WARNING "FFmpeg not found. RTMP streaming features are disabled.")
+endif()
 
 # Deploy Qt dependencies using windeployqt (Windows) or macdeployqt (macOS)
 if(WIN32)

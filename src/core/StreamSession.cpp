@@ -31,6 +31,8 @@ StreamSession::StreamSession(QObject* parent)
             this, &StreamSession::logMessage);
     connect(m_streamer, &RtmpStreamer::errorOccurred,
             this, &StreamSession::logMessage);
+        connect(m_streamer, &RtmpStreamer::statsUpdated,
+            this, &StreamSession::statsUpdated);
 
     refreshCameras();
 }

@@ -34,6 +34,11 @@ signals:
     void previewFrameReady(const QImage& frame);
     void logMessage(const QString& message);
     void streamingStateChanged(bool running);
+    void statsUpdated(quint64 inputFrames,
+                      quint64 encodedPackets,
+                      quint64 droppedFrames,
+                      quint64 reconnectCount,
+                      quint64 failedWrites);
 
 private:
     void onVideoFrameChanged(const QVideoFrame& frame);

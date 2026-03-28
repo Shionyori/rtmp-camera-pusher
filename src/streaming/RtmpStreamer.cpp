@@ -2,6 +2,9 @@
 
 #include <QByteArray>
 
+#include <algorithm>
+#include <chrono>
+
 #if defined(HAS_FFMPEG)
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -16,6 +19,7 @@ extern "C" {
 RtmpStreamer::RtmpStreamer(QObject* parent)
     : QObject(parent)
 {
+    m_lastStatsEmit = std::chrono::steady_clock::now();
 }
 
 RtmpStreamer::~RtmpStreamer()
@@ -40,6 +44,12 @@ bool RtmpStreamer::start(const Config& config)
     return false;
 #else
     m_config = config;
+    m_inputFrames.store(0);
+    m_encodedPackets.store(0);
+    m_droppedFrames.store(0);
+    m_reconnectCount.store(0);
+    m_failedWrites.store(0);
+    m_lastStatsEmit = std::chrono::steady_clock::now();
 
     if (!initOutput(config)) {
         cleanupOutput();
@@ -55,6 +65,7 @@ bool RtmpStreamer::start(const Config& config)
                          .arg(config.width)
                          .arg(config.height)
                          .arg(config.fps));
+    emitStatsIfNeeded(true);
     return true;
 #endif
 }
@@ -84,6 +95,7 @@ void RtmpStreamer::stop()
 
     m_running.store(false);
     m_stopping.store(false);
+    emitStatsIfNeeded(true);
     emit stopped();
     emit infoMessage("推流已停止");
 }
@@ -99,16 +111,20 @@ void RtmpStreamer::pushFrame(const QImage& image)
         return;
     }
 
+    m_inputFrames.fetch_add(1);
+
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         if (m_frameQueue.size() >= kMaxQueueSize) {
             m_frameQueue.pop_front();
+            m_droppedFrames.fetch_add(1);
             emit infoMessage("帧队列已满，丢弃最旧帧");
         }
         m_frameQueue.push_back(std::move(converted));
     }
 
     m_queueCv.notify_one();
+    emitStatsIfNeeded();
 }
 
 bool RtmpStreamer::isRunning() const
@@ -137,9 +153,13 @@ void RtmpStreamer::workerLoop()
         }
 
         if (!encodeAndWriteImage(frame)) {
-            emit errorOccurred("编码或发送失败，推流即将停止。");
-            m_stopping.store(true);
+            if (!reconnectOutput()) {
+                emit errorOccurred("编码或发送失败，重连多次后仍失败，推流即将停止。");
+                m_stopping.store(true);
+            }
         }
+
+        emitStatsIfNeeded();
     }
 
     if (!flushEncoder()) {
@@ -156,6 +176,47 @@ void RtmpStreamer::workerLoop()
 }
 
 #if defined(HAS_FFMPEG)
+bool RtmpStreamer::reconnectOutput()
+{
+    cleanupOutput();
+
+    const int maxRetries = std::max(1, m_config.reconnectMaxRetries);
+    const int baseDelayMs = std::max(100, m_config.reconnectBaseDelayMs);
+
+    for (int attempt = 1; attempt <= maxRetries && !m_stopping.load(); ++attempt) {
+        emit infoMessage(QString("推流链路异常，尝试重连 (%1/%2)...").arg(attempt).arg(maxRetries));
+
+        const int delayMs = baseDelayMs * attempt;
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+
+        if (initOutput(m_config)) {
+            m_reconnectCount.fetch_add(1);
+            emit infoMessage("重连成功，恢复推流。");
+            emitStatsIfNeeded(true);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void RtmpStreamer::emitStatsIfNeeded(bool force)
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastStatsEmit).count();
+    if (!force && elapsed < 1000) {
+        return;
+    }
+
+    m_lastStatsEmit = now;
+    emit statsUpdated(
+        m_inputFrames.load(),
+        m_encodedPackets.load(),
+        m_droppedFrames.load(),
+        m_reconnectCount.load(),
+        m_failedWrites.load());
+}
+
 bool RtmpStreamer::initOutput(const Config& config)
 {
     int ret = avformat_network_init();
@@ -371,9 +432,12 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
         av_packet_unref(m_packet);
 
         if (writeRet < 0) {
+            m_failedWrites.fetch_add(1);
             emit errorOccurred(QString("写入 RTMP 包失败: %1").arg(ffmpegError(writeRet)));
             return false;
         }
+
+        m_encodedPackets.fetch_add(1);
     }
 
     return true;

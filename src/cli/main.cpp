@@ -58,6 +58,19 @@ int main(int argc, char* argv[])
     QObject::connect(&session, &StreamSession::logMessage, [](const QString& message) {
         std::cout << message.toStdString() << std::endl;
     });
+    QObject::connect(&session, &StreamSession::statsUpdated,
+                     [](quint64 inputFrames,
+                        quint64 encodedPackets,
+                        quint64 droppedFrames,
+                        quint64 reconnectCount,
+                        quint64 failedWrites) {
+                         std::cout << "[stats] in=" << inputFrames
+                                   << " out=" << encodedPackets
+                                   << " drop=" << droppedFrames
+                                   << " reconnect=" << reconnectCount
+                                   << " failedWrite=" << failedWrites
+                                   << std::endl;
+                     });
 
     const QStringList cameras = session.cameraDescriptions();
     if (parser.isSet(listCamerasOption)) {

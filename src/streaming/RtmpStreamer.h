@@ -5,6 +5,7 @@
 #include <QString>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -31,6 +32,8 @@ public:
         int height = 720;
         int fps = 25;
         int bitrateKbps = 2500;
+        int reconnectMaxRetries = 5;
+        int reconnectBaseDelayMs = 1000;
     };
 
     explicit RtmpStreamer(QObject* parent = nullptr);
@@ -47,11 +50,18 @@ signals:
     void stopped();
     void errorOccurred(const QString& message);
     void infoMessage(const QString& message);
+    void statsUpdated(quint64 inputFrames,
+                      quint64 encodedPackets,
+                      quint64 droppedFrames,
+                      quint64 reconnectCount,
+                      quint64 failedWrites);
 
 private:
     static constexpr std::size_t kMaxQueueSize = 6;
 
     void workerLoop();
+    bool reconnectOutput();
+    void emitStatsIfNeeded(bool force = false);
 
 #if defined(HAS_FFMPEG)
     bool initOutput(const Config& config);
@@ -72,6 +82,12 @@ private:
     Config m_config;
     std::atomic<bool> m_running { false };
     std::atomic<bool> m_stopping { false };
+    std::atomic<quint64> m_inputFrames { 0 };
+    std::atomic<quint64> m_encodedPackets { 0 };
+    std::atomic<quint64> m_droppedFrames { 0 };
+    std::atomic<quint64> m_reconnectCount { 0 };
+    std::atomic<quint64> m_failedWrites { 0 };
+    std::chrono::steady_clock::time_point m_lastStatsEmit;
     std::thread m_worker;
     std::mutex m_queueMutex;
     std::condition_variable m_queueCv;

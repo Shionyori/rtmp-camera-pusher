@@ -4,6 +4,17 @@
 
 #include <algorithm>
 #include <chrono>
+#include <QUrl>
+
+#include <cerrno>
+#include <cstring>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 #if defined(HAS_FFMPEG)
 extern "C" {
@@ -40,6 +51,80 @@ bool RtmpStreamer::start(const Config& config)
         return false;
     }
 
+    QUrl parsedUrl(config.url);
+    QString scheme = parsedUrl.scheme().toLower();
+    if (!(scheme == "rtmp" || scheme == "rtmps")) {
+        emit errorOccurred("RTMP 地址必须以 rtmp:// 或 rtmps:// 开头。");
+        return false;
+    }
+
+    auto probeRtmpHost = [](const QString& urlStr, int timeoutMs) -> bool {
+        QUrl u(urlStr);
+        if (!u.isValid()) return false;
+        QString host = u.host();
+        if (host.isEmpty()) return false;
+        int port = u.port(1935);
+
+        struct addrinfo hints;
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        char portbuf[16];
+        snprintf(portbuf, sizeof(portbuf), "%d", port);
+
+        struct addrinfo* res = nullptr;
+        int err = getaddrinfo(host.toUtf8().constData(), portbuf, &hints, &res);
+        if (err != 0 || res == nullptr) {
+            return false;
+        }
+
+        bool ok = false;
+        for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+            int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) continue;
+
+            int flags = fcntl(fd, F_GETFL, 0);
+            if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+            int r = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+            if (r == 0) {
+                ok = true;
+                close(fd);
+                break;
+            } else if (errno == EINPROGRESS) {
+                fd_set wf;
+                FD_ZERO(&wf);
+                FD_SET(fd, &wf);
+                struct timeval tv;
+                tv.tv_sec = timeoutMs / 1000;
+                tv.tv_usec = (timeoutMs % 1000) * 1000;
+                int sel = select(fd + 1, nullptr, &wf, nullptr, &tv);
+                if (sel > 0 && FD_ISSET(fd, &wf)) {
+                    int soerr = 0;
+                    socklen_t len = sizeof(soerr);
+                    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0) {
+                        if (soerr == 0) {
+                            ok = true;
+                            close(fd);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            close(fd);
+        }
+
+        freeaddrinfo(res);
+        return ok;
+    };
+
+    if (!probeRtmpHost(config.url, 2000)) {
+        emit errorOccurred("无法连接到 RTMP 主机，请检查 URL 与网络。");
+        return false;
+    }
+
 #if !defined(HAS_FFMPEG)
     emit errorOccurred("未检测到 FFmpeg 开发库，无法启动推流");
     return false;
@@ -62,6 +147,10 @@ bool RtmpStreamer::start(const Config& config)
     m_worker = std::thread(&RtmpStreamer::workerLoop, this);
 
     emit started();
+    emit infoMessage(QString("推流已启动: %1x%2 @ %3fps")
+                         .arg(config.width)
+                         .arg(config.height)
+                         .arg(config.fps));
     emitStatsIfNeeded(true);
     return true;
 #endif
@@ -94,6 +183,18 @@ void RtmpStreamer::stop()
     m_stopping.store(false);
     emitStatsIfNeeded(true);
     emit stopped();
+    
+    const quint64 inputFrames = m_inputFrames.load();
+    const quint64 encodedPackets = m_encodedPackets.load();
+    const quint64 droppedFrames = m_droppedFrames.load();
+    const quint64 reconnectCount = m_reconnectCount.load();
+    const quint64 failedWrites = m_failedWrites.load();
+    emit infoMessage(QString("推流已停止: 采集帧 %1 编码包 %2 丢帧 %3 重连 %4 失败 %5")
+                         .arg(inputFrames)
+                         .arg(encodedPackets)
+                         .arg(droppedFrames)
+                         .arg(reconnectCount)
+                         .arg(failedWrites));
 }
 
 void RtmpStreamer::pushFrame(const QImage& image)

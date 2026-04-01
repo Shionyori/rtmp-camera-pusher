@@ -20,6 +20,7 @@ RtmpStreamer::RtmpStreamer(QObject* parent)
     : QObject(parent)
 {
     m_lastStatsEmit = std::chrono::steady_clock::now();
+    m_lastQueueDropLogEmit = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 }
 
 RtmpStreamer::~RtmpStreamer()
@@ -30,12 +31,12 @@ RtmpStreamer::~RtmpStreamer()
 bool RtmpStreamer::start(const Config& config)
 {
     if (m_running.load()) {
-        emit infoMessage("推流已在运行中");
+        emit infoMessage("推流已在运行中。");
         return true;
     }
 
     if (config.url.trimmed().isEmpty()) {
-        emit errorOccurred("RTMP 地址不能为空");
+        emit errorOccurred("RTMP 地址不能为空。");
         return false;
     }
 
@@ -61,10 +62,6 @@ bool RtmpStreamer::start(const Config& config)
     m_worker = std::thread(&RtmpStreamer::workerLoop, this);
 
     emit started();
-    emit infoMessage(QString("推流已启动: %1x%2 @ %3fps")
-                         .arg(config.width)
-                         .arg(config.height)
-                         .arg(config.fps));
     emitStatsIfNeeded(true);
     return true;
 #endif
@@ -97,7 +94,6 @@ void RtmpStreamer::stop()
     m_stopping.store(false);
     emitStatsIfNeeded(true);
     emit stopped();
-    emit infoMessage("推流已停止");
 }
 
 void RtmpStreamer::pushFrame(const QImage& image)
@@ -118,7 +114,12 @@ void RtmpStreamer::pushFrame(const QImage& image)
         if (m_frameQueue.size() >= kMaxQueueSize) {
             m_frameQueue.pop_front();
             m_droppedFrames.fetch_add(1);
-            emit infoMessage("帧队列已满，丢弃最旧帧");
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastQueueDropLogEmit).count();
+            if (elapsed >= 2000) {
+                m_lastQueueDropLogEmit = now;
+                emit infoMessage("帧队列持续积压，已丢弃旧帧以保持实时性。");
+            }
         }
         m_frameQueue.push_back(std::move(converted));
     }
@@ -321,7 +322,6 @@ bool RtmpStreamer::initOutput(const Config& config)
     }
 
     m_frameIndex = 0;
-    emit infoMessage("RTMP 输出已建立，开始接收视频帧。");
     return true;
 }
 

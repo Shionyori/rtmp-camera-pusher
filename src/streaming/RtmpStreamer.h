@@ -88,6 +88,7 @@ private:
     std::atomic<quint64> m_reconnectCount { 0 };
     std::atomic<quint64> m_failedWrites { 0 };
     std::chrono::steady_clock::time_point m_lastStatsEmit;
+    std::chrono::steady_clock::time_point m_lastQueueDropLogEmit;
     std::thread m_worker;
     std::mutex m_queueMutex;
     std::condition_variable m_queueCv;

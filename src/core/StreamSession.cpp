@@ -21,17 +21,17 @@ StreamSession::StreamSession(QObject* parent)
 
     connect(m_streamer, &RtmpStreamer::started, this, [this]() {
         emit streamingStateChanged(true);
-        emit logMessage("推流启动成功。");
+        emit logMessage("推流状态: 已启动");
     });
     connect(m_streamer, &RtmpStreamer::stopped, this, [this]() {
         emit streamingStateChanged(false);
-        emit logMessage("推流已停止。");
+        emit logMessage("推流状态: 已停止");
     });
     connect(m_streamer, &RtmpStreamer::infoMessage,
             this, &StreamSession::logMessage);
     connect(m_streamer, &RtmpStreamer::errorOccurred,
             this, &StreamSession::logMessage);
-        connect(m_streamer, &RtmpStreamer::statsUpdated,
+    connect(m_streamer, &RtmpStreamer::statsUpdated,
             this, &StreamSession::statsUpdated);
 
     refreshCameras();

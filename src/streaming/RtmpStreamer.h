@@ -76,7 +76,10 @@ private:
     AVPacket* m_packet = nullptr;
     AVStream* m_videoStream = nullptr;
     SwsContext* m_swsCtx = nullptr;
-    int64_t m_frameIndex = 0;
+    std::chrono::steady_clock::time_point m_ptsStartTime {};
+    int64_t m_lastFramePtsMs = -1;
+    bool m_ptsClockStarted = false;
+    bool m_hasSentKeyframe = false;
 #endif
 
     Config m_config;

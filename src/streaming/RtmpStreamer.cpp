@@ -358,7 +358,7 @@ bool RtmpStreamer::initOutput(const Config& config)
     m_codecCtx->codec_type = AVMEDIA_TYPE_VIDEO;
     m_codecCtx->width = config.width;
     m_codecCtx->height = config.height;
-    m_codecCtx->time_base = AVRational { 1, config.fps };
+    m_codecCtx->time_base = AVRational { 1, 1000 };
     m_codecCtx->framerate = AVRational { config.fps, 1 };
     m_codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
     m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrateKbps) * 1000;
@@ -384,7 +384,12 @@ bool RtmpStreamer::initOutput(const Config& config)
         return false;
     }
 
-    m_videoStream->time_base = m_codecCtx->time_base;
+    if (m_videoStream->codecpar->extradata == nullptr || m_videoStream->codecpar->extradata_size <= 0) {
+        emit errorOccurred("编码器未生成 SPS/PPS (extradata)，无法初始化 RTMP H.264 码流。");
+        return false;
+    }
+
+    m_videoStream->time_base = AVRational { 1, 1000 };
 
     m_frame = av_frame_alloc();
     if (m_frame == nullptr) {
@@ -422,7 +427,9 @@ bool RtmpStreamer::initOutput(const Config& config)
         return false;
     }
 
-    m_frameIndex = 0;
+    m_lastFramePtsMs = -1;
+    m_ptsClockStarted = false;
+    m_hasSentKeyframe = false;
     return true;
 }
 
@@ -462,6 +469,10 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
         return false;
     }
 
+    if (image.isNull() || image.width() <= 0 || image.height() <= 0) {
+        return false;
+    }
+
     int ret = av_frame_make_writable(m_frame);
     if (ret < 0) {
         emit errorOccurred(QString("编码帧不可写: %1").arg(ffmpegError(ret)));
@@ -486,14 +497,28 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
         return false;
     }
 
+    const int packedStride = image.width() * 4;
+    QByteArray packedRgba;
+    const uint8_t* sourceBits = image.constBits();
+
+    if (image.bytesPerLine() != packedStride) {
+        packedRgba.resize(packedStride * image.height());
+        uint8_t* dst = reinterpret_cast<uint8_t*>(packedRgba.data());
+        for (int y = 0; y < image.height(); ++y) {
+            const uint8_t* srcRow = sourceBits + (static_cast<ptrdiff_t>(y) * image.bytesPerLine());
+            std::memcpy(dst + (static_cast<ptrdiff_t>(y) * packedStride), srcRow, packedStride);
+        }
+        sourceBits = reinterpret_cast<const uint8_t*>(packedRgba.constData());
+    }
+
     uint8_t* srcData[4] = {
-        const_cast<uint8_t*>(image.constBits()),
+        const_cast<uint8_t*>(sourceBits),
         nullptr,
         nullptr,
         nullptr
     };
     int srcLineSize[4] = {
-        static_cast<int>(image.bytesPerLine()),
+        packedStride,
         0,
         0,
         0
@@ -508,7 +533,28 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
         m_frame->data,
         m_frame->linesize);
 
-    m_frame->pts = m_frameIndex++;
+    const auto now = std::chrono::steady_clock::now();
+    int64_t ptsMs = 0;
+    if (!m_ptsClockStarted) {
+        m_ptsStartTime = now;
+        m_ptsClockStarted = true;
+    } else {
+        ptsMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_ptsStartTime).count();
+    }
+
+    if (ptsMs <= m_lastFramePtsMs) {
+        ptsMs = m_lastFramePtsMs + 1;
+    }
+    m_lastFramePtsMs = ptsMs;
+    m_frame->pts = ptsMs;
+
+    if (!m_hasSentKeyframe) {
+        m_frame->pict_type = AV_PICTURE_TYPE_I;
+        m_frame->key_frame = 1;
+    } else {
+        m_frame->pict_type = AV_PICTURE_TYPE_NONE;
+        m_frame->key_frame = 0;
+    }
 
     ret = avcodec_send_frame(m_codecCtx, m_frame);
     if (ret < 0) {
@@ -524,6 +570,16 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
         if (ret < 0) {
             emit errorOccurred(QString("从编码器取包失败: %1").arg(ffmpegError(ret)));
             return false;
+        }
+
+        if (!m_hasSentKeyframe) {
+            if ((m_packet->flags & AV_PKT_FLAG_KEY) == 0) {
+                av_packet_unref(m_packet);
+                continue;
+            }
+
+            m_hasSentKeyframe = true;
+            emit infoMessage("已发送首个关键帧，解码器初始化完成。");
         }
 
         av_packet_rescale_ts(m_packet, m_codecCtx->time_base, m_videoStream->time_base);

@@ -21,6 +21,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
@@ -427,8 +428,7 @@ bool RtmpStreamer::initOutput(const Config& config)
         return false;
     }
 
-    m_lastFramePtsMs = -1;
-    m_ptsClockStarted = false;
+    m_frameIndex = 0;
     m_hasSentKeyframe = false;
     return true;
 }
@@ -533,28 +533,12 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
         m_frame->data,
         m_frame->linesize);
 
-    const auto now = std::chrono::steady_clock::now();
-    int64_t ptsMs = 0;
-    if (!m_ptsClockStarted) {
-        m_ptsStartTime = now;
-        m_ptsClockStarted = true;
-    } else {
-        ptsMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_ptsStartTime).count();
-    }
-
-    if (ptsMs <= m_lastFramePtsMs) {
-        ptsMs = m_lastFramePtsMs + 1;
-    }
-    m_lastFramePtsMs = ptsMs;
+    const int safeFps = std::max(1, m_config.fps);
+    const AVRational frameTb { 1, safeFps };
+    const AVRational msTb { 1, 1000 };
+    const int64_t ptsMs = av_rescale_q(m_frameIndex, frameTb, msTb);
     m_frame->pts = ptsMs;
-
-    if (!m_hasSentKeyframe) {
-        m_frame->pict_type = AV_PICTURE_TYPE_I;
-        m_frame->key_frame = 1;
-    } else {
-        m_frame->pict_type = AV_PICTURE_TYPE_NONE;
-        m_frame->key_frame = 0;
-    }
+    ++m_frameIndex;
 
     ret = avcodec_send_frame(m_codecCtx, m_frame);
     if (ret < 0) {
@@ -579,7 +563,9 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
             }
 
             m_hasSentKeyframe = true;
-            emit infoMessage("已发送首个关键帧，解码器初始化完成。");
+            emit infoMessage(QString("首个关键帧已发送 | pts=%1ms size=%2B")
+                                 .arg(m_packet->pts)
+                                 .arg(m_packet->size));
         }
 
         av_packet_rescale_ts(m_packet, m_codecCtx->time_base, m_videoStream->time_base);

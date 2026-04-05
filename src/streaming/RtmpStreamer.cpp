@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <QFileInfo>
 #include <QUrl>
 
 #include <cerrno>
@@ -30,6 +29,128 @@ extern "C" {
 }
 #endif
 
+namespace {
+constexpr int kDefaultRtmpPort = 1935;
+constexpr int kHostProbeTimeoutMs = 2000;
+constexpr int kReconnectMinDelayMs = 100;
+constexpr int kQueueDropLogIntervalMs = 2000;
+constexpr int kStatsEmitIntervalMs = 1000;
+constexpr const char* kFlvExtension = ".flv";
+constexpr const char* kX264Profile = "main";
+constexpr const char* kX264Level = "3.1";
+constexpr const char* kX264Preset = "veryfast";
+constexpr const char* kX264Tune = "zerolatency";
+constexpr const char* kX264Params = "colorprim=bt709:transfer=bt709:colormatrix=bt709:repeat-headers=1:aud=1";
+
+bool probeRtmpHost(const QString& urlStr, int timeoutMs)
+{
+    QUrl u(urlStr);
+    if (!u.isValid()) return false;
+    QString host = u.host();
+    if (host.isEmpty()) return false;
+    int port = u.port(kDefaultRtmpPort);
+
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    char portbuf[16];
+    snprintf(portbuf, sizeof(portbuf), "%d", port);
+
+    struct addrinfo* res = nullptr;
+    int err = getaddrinfo(host.toUtf8().constData(), portbuf, &hints, &res);
+    if (err != 0 || res == nullptr) {
+        return false;
+    }
+
+    bool ok = false;
+    for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+        int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+        int r = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (r == 0) {
+            ok = true;
+            close(fd);
+            break;
+        } else if (errno == EINPROGRESS) {
+            fd_set wf;
+            FD_ZERO(&wf);
+            FD_SET(fd, &wf);
+            struct timeval tv;
+            tv.tv_sec = timeoutMs / 1000;
+            tv.tv_usec = (timeoutMs % 1000) * 1000;
+            int sel = select(fd + 1, nullptr, &wf, nullptr, &tv);
+            if (sel > 0 && FD_ISSET(fd, &wf)) {
+                int soerr = 0;
+                socklen_t len = sizeof(soerr);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0) {
+                    if (soerr == 0) {
+                        ok = true;
+                        close(fd);
+                        break;
+                    }
+                }
+            }
+        }
+
+        close(fd);
+    }
+
+    freeaddrinfo(res);
+    return ok;
+}
+
+bool normalizeOutputConfig(const RtmpStreamer::Config& input,
+                           RtmpStreamer::Config* output,
+                           QString* errorMessage)
+{
+    if (output == nullptr || errorMessage == nullptr) {
+        return false;
+    }
+
+    *output = input;
+
+    QUrl parsedUrl(input.url);
+    QString scheme = parsedUrl.scheme().toLower();
+    const bool isRtmpOutput = (scheme == "rtmp" || scheme == "rtmps");
+    const bool isFileOutput = (scheme.isEmpty() || scheme == "file");
+
+    if (!isRtmpOutput && !isFileOutput) {
+        *errorMessage = "输出地址必须是 rtmp://、rtmps:// 或本地 .flv 文件路径。";
+        return false;
+    }
+
+    if (isFileOutput) {
+        QString localPath = input.url;
+        if (scheme == "file") {
+            localPath = parsedUrl.toLocalFile();
+            if (localPath.isEmpty()) {
+                localPath = parsedUrl.path();
+            }
+        }
+
+        if (!localPath.toLower().endsWith(kFlvExtension)) {
+            *errorMessage = "本地输出仅支持 .flv 文件路径。";
+            return false;
+        }
+
+        output->url = localPath;
+    }
+
+    if (isRtmpOutput && !probeRtmpHost(input.url, kHostProbeTimeoutMs)) {
+        *errorMessage = "无法连接到 RTMP 主机，请检查 URL 与网络。";
+        return false;
+    }
+
+    return true;
+}
+}
+
 RtmpStreamer::RtmpStreamer(QObject* parent)
     : QObject(parent)
 {
@@ -54,99 +175,10 @@ bool RtmpStreamer::start(const Config& config)
         return false;
     }
 
-    Config normalizedConfig = config;
-
-    QUrl parsedUrl(config.url);
-    QString scheme = parsedUrl.scheme().toLower();
-    const bool isRtmpOutput = (scheme == "rtmp" || scheme == "rtmps");
-    const bool isFileOutput = (scheme.isEmpty() || scheme == "file");
-
-    if (!isRtmpOutput && !isFileOutput) {
-        emit errorOccurred("输出地址必须是 rtmp://、rtmps:// 或本地 .flv 文件路径。");
-        return false;
-    }
-
-    if (isFileOutput) {
-        QString localPath = config.url;
-        if (scheme == "file") {
-            localPath = parsedUrl.toLocalFile();
-            if (localPath.isEmpty()) {
-                localPath = parsedUrl.path();
-            }
-        }
-
-        if (!localPath.toLower().endsWith(".flv")) {
-            emit errorOccurred("本地输出仅支持 .flv 文件路径。");
-            return false;
-        }
-
-        normalizedConfig.url = localPath;
-    }
-
-    auto probeRtmpHost = [](const QString& urlStr, int timeoutMs) -> bool {
-        QUrl u(urlStr);
-        if (!u.isValid()) return false;
-        QString host = u.host();
-        if (host.isEmpty()) return false;
-        int port = u.port(1935);
-
-        struct addrinfo hints;
-        std::memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-
-        char portbuf[16];
-        snprintf(portbuf, sizeof(portbuf), "%d", port);
-
-        struct addrinfo* res = nullptr;
-        int err = getaddrinfo(host.toUtf8().constData(), portbuf, &hints, &res);
-        if (err != 0 || res == nullptr) {
-            return false;
-        }
-
-        bool ok = false;
-        for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
-            int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-            if (fd < 0) continue;
-
-            int flags = fcntl(fd, F_GETFL, 0);
-            if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-            int r = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
-            if (r == 0) {
-                ok = true;
-                close(fd);
-                break;
-            } else if (errno == EINPROGRESS) {
-                fd_set wf;
-                FD_ZERO(&wf);
-                FD_SET(fd, &wf);
-                struct timeval tv;
-                tv.tv_sec = timeoutMs / 1000;
-                tv.tv_usec = (timeoutMs % 1000) * 1000;
-                int sel = select(fd + 1, nullptr, &wf, nullptr, &tv);
-                if (sel > 0 && FD_ISSET(fd, &wf)) {
-                    int soerr = 0;
-                    socklen_t len = sizeof(soerr);
-                    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0) {
-                        if (soerr == 0) {
-                            ok = true;
-                            close(fd);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            close(fd);
-        }
-
-        freeaddrinfo(res);
-        return ok;
-    };
-
-    if (isRtmpOutput && !probeRtmpHost(config.url, 2000)) {
-        emit errorOccurred("无法连接到 RTMP 主机，请检查 URL 与网络。");
+    Config normalizedConfig;
+    QString configError;
+    if (!normalizeOutputConfig(config, &normalizedConfig, &configError)) {
+        emit errorOccurred(configError);
         return false;
     }
 
@@ -242,7 +274,7 @@ void RtmpStreamer::pushFrame(const QImage& image)
             m_droppedFrames.fetch_add(1);
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastQueueDropLogEmit).count();
-            if (elapsed >= 2000) {
+            if (elapsed >= kQueueDropLogIntervalMs) {
                 m_lastQueueDropLogEmit = now;
                 emit infoMessage("帧队列持续积压，已丢弃旧帧以保持实时性。");
             }
@@ -308,7 +340,7 @@ bool RtmpStreamer::reconnectOutput()
     cleanupOutput();
 
     const int maxRetries = std::max(1, m_config.reconnectMaxRetries);
-    const int baseDelayMs = std::max(100, m_config.reconnectBaseDelayMs);
+    const int baseDelayMs = std::max(kReconnectMinDelayMs, m_config.reconnectBaseDelayMs);
 
     for (int attempt = 1; attempt <= maxRetries && !m_stopping.load(); ++attempt) {
         emit infoMessage(QString("推流链路异常，尝试重连 (%1/%2)...").arg(attempt).arg(maxRetries));
@@ -331,7 +363,7 @@ void RtmpStreamer::emitStatsIfNeeded(bool force)
 {
     const auto now = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastStatsEmit).count();
-    if (!force && elapsed < 1000) {
+    if (!force && elapsed < kStatsEmitIntervalMs) {
         return;
     }
 
@@ -386,6 +418,10 @@ bool RtmpStreamer::initOutput(const Config& config)
     m_codecCtx->time_base = AVRational { 1, 1000 };
     m_codecCtx->framerate = AVRational { config.fps, 1 };
     m_codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+    m_codecCtx->colorspace = AVCOL_SPC_BT709;
+    m_codecCtx->color_primaries = AVCOL_PRI_BT709;
+    m_codecCtx->color_trc = AVCOL_TRC_BT709;
+    m_codecCtx->chroma_sample_location = AVCHROMA_LOC_LEFT;
     m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrateKbps) * 1000;
     m_codecCtx->gop_size = config.fps * 2;
     m_codecCtx->max_b_frames = 0;
@@ -394,8 +430,13 @@ bool RtmpStreamer::initOutput(const Config& config)
         m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
 
-    av_opt_set(m_codecCtx->priv_data, "preset", "veryfast", 0);
-    av_opt_set(m_codecCtx->priv_data, "tune", "zerolatency", 0);
+    av_opt_set(m_codecCtx->priv_data, "profile", kX264Profile, 0);
+    av_opt_set(m_codecCtx->priv_data, "level", kX264Level, 0);
+    av_opt_set(m_codecCtx->priv_data, "x264-params",
+               kX264Params,
+               0);
+    av_opt_set(m_codecCtx->priv_data, "preset", kX264Preset, 0);
+    av_opt_set(m_codecCtx->priv_data, "tune", kX264Tune, 0);
 
     ret = avcodec_open2(m_codecCtx, codec, nullptr);
     if (ret < 0) {
@@ -476,7 +517,6 @@ bool RtmpStreamer::initOutput(const Config& config)
     }
 
     m_frameIndex = 0;
-    m_packetLogCount = 0;
     m_hasSentKeyframe = false;
     return true;
 }
@@ -588,6 +628,12 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
     m_frame->pts = ptsMs;
     ++m_frameIndex;
 
+    // 某些链路仅在帧级别透传色彩信息，编码前同步设置一次。
+    m_frame->colorspace = AVCOL_SPC_BT709;
+    m_frame->color_primaries = AVCOL_PRI_BT709;
+    m_frame->color_trc = AVCOL_TRC_BT709;
+    m_frame->chroma_location = AVCHROMA_LOC_LEFT;
+
     ret = avcodec_send_frame(m_codecCtx, m_frame);
     if (ret < 0) {
         emit errorOccurred(QString("送入编码器失败: %1").arg(ffmpegError(ret)));
@@ -618,16 +664,6 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
 
         if (m_packet->dts == AV_NOPTS_VALUE && m_packet->pts != AV_NOPTS_VALUE) {
             m_packet->dts = m_packet->pts;
-        }
-
-        if (m_packetLogCount < 5) {
-            emit infoMessage(QString("调试包#%1 | key=%2 | pts=%3 dts=%4 | flags=0x%5")
-                                 .arg(m_packetLogCount + 1)
-                                 .arg((m_packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0)
-                                 .arg(m_packet->pts)
-                                 .arg(m_packet->dts)
-                                 .arg(m_packet->flags, 0, 16));
-            ++m_packetLogCount;
         }
 
         av_packet_rescale_ts(m_packet, m_codecCtx->time_base, m_videoStream->time_base);

@@ -77,7 +77,6 @@ private:
     AVStream* m_videoStream = nullptr;
     SwsContext* m_swsCtx = nullptr;
     int64_t m_frameIndex = 0;
-    int m_packetLogCount = 0;
     bool m_hasSentKeyframe = false;
 #endif
 

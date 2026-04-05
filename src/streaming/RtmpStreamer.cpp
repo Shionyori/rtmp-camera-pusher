@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <QFileInfo>
 #include <QUrl>
 
 #include <cerrno>
@@ -22,6 +23,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
@@ -52,11 +54,33 @@ bool RtmpStreamer::start(const Config& config)
         return false;
     }
 
+    Config normalizedConfig = config;
+
     QUrl parsedUrl(config.url);
     QString scheme = parsedUrl.scheme().toLower();
-    if (!(scheme == "rtmp" || scheme == "rtmps")) {
-        emit errorOccurred("RTMP 地址必须以 rtmp:// 或 rtmps:// 开头。");
+    const bool isRtmpOutput = (scheme == "rtmp" || scheme == "rtmps");
+    const bool isFileOutput = (scheme.isEmpty() || scheme == "file");
+
+    if (!isRtmpOutput && !isFileOutput) {
+        emit errorOccurred("输出地址必须是 rtmp://、rtmps:// 或本地 .flv 文件路径。");
         return false;
+    }
+
+    if (isFileOutput) {
+        QString localPath = config.url;
+        if (scheme == "file") {
+            localPath = parsedUrl.toLocalFile();
+            if (localPath.isEmpty()) {
+                localPath = parsedUrl.path();
+            }
+        }
+
+        if (!localPath.toLower().endsWith(".flv")) {
+            emit errorOccurred("本地输出仅支持 .flv 文件路径。");
+            return false;
+        }
+
+        normalizedConfig.url = localPath;
     }
 
     auto probeRtmpHost = [](const QString& urlStr, int timeoutMs) -> bool {
@@ -121,7 +145,7 @@ bool RtmpStreamer::start(const Config& config)
         return ok;
     };
 
-    if (!probeRtmpHost(config.url, 2000)) {
+    if (isRtmpOutput && !probeRtmpHost(config.url, 2000)) {
         emit errorOccurred("无法连接到 RTMP 主机，请检查 URL 与网络。");
         return false;
     }
@@ -130,7 +154,7 @@ bool RtmpStreamer::start(const Config& config)
     emit errorOccurred("未检测到 FFmpeg 开发库，无法启动推流");
     return false;
 #else
-    m_config = config;
+    m_config = normalizedConfig;
     m_inputFrames.store(0);
     m_encodedPackets.store(0);
     m_droppedFrames.store(0);
@@ -138,7 +162,7 @@ bool RtmpStreamer::start(const Config& config)
     m_failedWrites.store(0);
     m_lastStatsEmit = std::chrono::steady_clock::now();
 
-    if (!initOutput(config)) {
+    if (!initOutput(normalizedConfig)) {
         cleanupOutput();
         return false;
     }
@@ -149,9 +173,9 @@ bool RtmpStreamer::start(const Config& config)
 
     emit started();
     emit infoMessage(QString("推流已启动: %1x%2 @ %3fps")
-                         .arg(config.width)
-                         .arg(config.height)
-                         .arg(config.fps));
+                         .arg(normalizedConfig.width)
+                         .arg(normalizedConfig.height)
+                         .arg(normalizedConfig.fps));
     emitStatsIfNeeded(true);
     return true;
 #endif
@@ -385,9 +409,32 @@ bool RtmpStreamer::initOutput(const Config& config)
         return false;
     }
 
+    if ((m_videoStream->codecpar->extradata == nullptr || m_videoStream->codecpar->extradata_size <= 0)
+        && m_codecCtx->extradata != nullptr
+        && m_codecCtx->extradata_size > 0) {
+        const int extraSize = m_codecCtx->extradata_size;
+        uint8_t* extraCopy = static_cast<uint8_t*>(av_mallocz(extraSize + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (extraCopy == nullptr) {
+            emit errorOccurred("复制 SPS/PPS 失败：内存分配失败。");
+            return false;
+        }
+
+        std::memcpy(extraCopy, m_codecCtx->extradata, extraSize);
+        m_videoStream->codecpar->extradata = extraCopy;
+        m_videoStream->codecpar->extradata_size = extraSize;
+    }
+
     if (m_videoStream->codecpar->extradata == nullptr || m_videoStream->codecpar->extradata_size <= 0) {
         emit errorOccurred("编码器未生成 SPS/PPS (extradata)，无法初始化 RTMP H.264 码流。");
         return false;
+    }
+
+    uint32_t codecTag = av_codec_get_tag(m_outputCtx->oformat->codec_tag, AV_CODEC_ID_H264);
+    if (codecTag == 0 && std::strcmp(m_outputCtx->oformat->name, "flv") == 0) {
+        codecTag = 7;
+    }
+    if (codecTag != 0) {
+        m_videoStream->codecpar->codec_tag = codecTag;
     }
 
     m_videoStream->time_base = AVRational { 1, 1000 };
@@ -429,6 +476,7 @@ bool RtmpStreamer::initOutput(const Config& config)
     }
 
     m_frameIndex = 0;
+    m_packetLogCount = 0;
     m_hasSentKeyframe = false;
     return true;
 }
@@ -566,6 +614,20 @@ bool RtmpStreamer::encodeAndWriteImage(const QImage& image)
             emit infoMessage(QString("首个关键帧已发送 | pts=%1ms size=%2B")
                                  .arg(m_packet->pts)
                                  .arg(m_packet->size));
+        }
+
+        if (m_packet->dts == AV_NOPTS_VALUE && m_packet->pts != AV_NOPTS_VALUE) {
+            m_packet->dts = m_packet->pts;
+        }
+
+        if (m_packetLogCount < 5) {
+            emit infoMessage(QString("调试包#%1 | key=%2 | pts=%3 dts=%4 | flags=0x%5")
+                                 .arg(m_packetLogCount + 1)
+                                 .arg((m_packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0)
+                                 .arg(m_packet->pts)
+                                 .arg(m_packet->dts)
+                                 .arg(m_packet->flags, 0, 16));
+            ++m_packetLogCount;
         }
 
         av_packet_rescale_ts(m_packet, m_codecCtx->time_base, m_videoStream->time_base);

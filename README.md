@@ -17,7 +17,7 @@
 
 核心推流逻辑在 `src/core` + `src/streaming`，GUI 只负责交互展示，CLI 适合 Ubuntu server 部署。
 
-## CLI 使用（推荐服务器）
+## CLI 使用
 
 先列出可用摄像头：
 
@@ -46,9 +46,29 @@
 - `--bitrate` 码率（kbps）
 - `--duration` 推流秒数，`0` 表示持续运行直到收到中断信号
 
+帮助文案会跟随 `--lang` 切换，例如：
+
+```bash
+./build/linux-debug/rtmp-camera-pusher --lang zh --help
+```
+
+## CLI 命令补全
+
+可导出补全脚本（`bash`/`zsh`/`fish`）：
+
+```bash
+./build/linux-debug/rtmp-camera-pusher --print-completion bash
+```
+
+示例（bash 临时加载）：
+
+```bash
+source <(./build/linux-debug/rtmp-camera-pusher --print-completion bash)
+```
+
 ## 可选构建
 
-仅构建 CLI（服务器推荐）：
+仅构建 CLI：
 
 ```bash
 cmake --preset linux-debug -DBUILD_GUI=OFF

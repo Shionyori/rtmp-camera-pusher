@@ -1,5 +1,7 @@
 #include "core/StreamSession.h"
 
+#include "common/AppLocale.h"
+
 #include <QCoreApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -9,7 +11,6 @@
 #include <QByteArray>
 
 #include <atomic>
-#include <clocale>
 #include <csignal>
 #include <iostream>
 
@@ -29,6 +30,7 @@ int main(int argc, char* argv[])
     }
 
     QGuiApplication app(argc, argv);
+    AppLocale::apply(AppLocale::Language::English);
     QCoreApplication::setApplicationName("rtmp-camera-pusher");
 
     QCommandLineParser parser;
@@ -36,6 +38,7 @@ int main(int argc, char* argv[])
     parser.addHelpOption();
 
     QCommandLineOption listCamerasOption("list-cameras", "列出摄像头并退出");
+    QCommandLineOption langOption("lang", "语言: en|zh (default: en)", "lang", "en");
     QCommandLineOption urlOption("url", "RTMP 推流地址", "url");
     QCommandLineOption cameraOption("camera", "摄像头索引（默认 0）", "index", "0");
     QCommandLineOption widthOption("width", "编码宽度", "width", "1280");
@@ -45,6 +48,7 @@ int main(int argc, char* argv[])
     QCommandLineOption durationOption("duration", "推流时长（秒，0 表示直到中断）", "seconds", "0");
 
     parser.addOption(listCamerasOption);
+    parser.addOption(langOption);
     parser.addOption(urlOption);
     parser.addOption(cameraOption);
     parser.addOption(widthOption);
@@ -54,9 +58,22 @@ int main(int argc, char* argv[])
     parser.addOption(durationOption);
     parser.process(app);
 
+    const QString langValue = parser.value(langOption).trimmed().toLower();
+    AppLocale::Language language = AppLocale::Language::English;
+    if (langValue == "en" || langValue == "en-us") {
+        language = AppLocale::Language::English;
+    } else if (langValue == "zh" || langValue == "zh-cn" || langValue == "cn") {
+        language = AppLocale::Language::Chinese;
+    } else {
+        std::cerr << "Invalid --lang value. Use: en or zh" << std::endl;
+        return 2;
+    }
+    AppLocale::apply(language);
+    const bool zh = (language == AppLocale::Language::Chinese);
+
     StreamSession session;
-    QObject::connect(&session, &StreamSession::logMessage, [](const QString& message) {
-        std::cout << message.toStdString() << std::endl;
+    QObject::connect(&session, &StreamSession::logMessage, [language](const QString& message) {
+        std::cout << AppLocale::localizeLogMessage(message, language).toStdString() << std::endl;
     });
     QObject::connect(&session, &StreamSession::statsUpdated,
                      [](quint64 inputFrames,
@@ -81,13 +98,16 @@ int main(int argc, char* argv[])
     }
 
     if (!parser.isSet(urlOption)) {
-        std::cerr << "缺少参数: --url <rtmp-url>" << std::endl;
+        std::cerr << (zh ? "缺少参数: --url <rtmp-url>" : "Missing argument: --url <rtmp-url>") << std::endl;
         parser.showHelp(2);
     }
 
     const int cameraIndex = parser.value(cameraOption).toInt();
     if (!session.selectCamera(cameraIndex)) {
-        std::cerr << "选择摄像头失败，请先使用 --list-cameras 查看可用索引。" << std::endl;
+        std::cerr << (zh
+            ? "选择摄像头失败，请先使用 --list-cameras 查看可用索引。"
+            : "Failed to select camera. Use --list-cameras to check valid indices.")
+            << std::endl;
         return 2;
     }
 
@@ -99,7 +119,7 @@ int main(int argc, char* argv[])
     config.bitrateKbps = parser.value(bitrateOption).toInt();
 
     if (!session.startStreaming(config)) {
-        std::cerr << "启动推流失败。" << std::endl;
+        std::cerr << (zh ? "启动推流失败。" : "Failed to start streaming.") << std::endl;
         return 3;
     }
 

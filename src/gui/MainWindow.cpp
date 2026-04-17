@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "common/AppLocale.h"
 #include "core/StreamSession.h"
 
 #include <QComboBox>
@@ -16,16 +17,16 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("RTMP Camera Pusher");
     resize(1080, 720);
 
     buildUi();
     m_session = new StreamSession(this);
 
     setupConnections();
+    applyLanguage();
     refreshCameraDevices();
     setStreamingControls(false);
-    appendLog("应用已启动，等待选择摄像头并开始推流。");
+    appendLog("Application started. Select a camera and start streaming.");
 }
 
 MainWindow::~MainWindow()
@@ -46,7 +47,7 @@ void MainWindow::onCameraListChanged(const QStringList& cameras)
     m_cameraCombo->addItems(cameras);
 
     if (cameras.isEmpty()) {
-        appendLog("未检测到可用摄像头设备。");
+        appendLog("No available camera devices were detected.");
         return;
     }
 
@@ -71,6 +72,13 @@ void MainWindow::onCameraSelectionChanged(int index)
     m_session->selectCamera(index);
 }
 
+void MainWindow::onLanguageChanged(int index)
+{
+    m_language = AppLocale::fromUiIndex(index);
+    AppLocale::apply(m_language);
+    applyLanguage();
+}
+
 void MainWindow::onStartClicked()
 {
     RtmpStreamer::Config config;
@@ -93,7 +101,7 @@ void MainWindow::onStopClicked()
 
 void MainWindow::appendLog(const QString& message)
 {
-    m_logView->append(message);
+    m_logView->append(AppLocale::localizeLogMessage(message, m_language));
 }
 
 void MainWindow::buildUi()
@@ -102,18 +110,28 @@ void MainWindow::buildUi()
     auto* rootLayout = new QVBoxLayout(central);
 
     auto* topBar = new QHBoxLayout();
-    topBar->addWidget(new QLabel("摄像头:", central));
+    m_cameraLabel = new QLabel(central);
+    topBar->addWidget(m_cameraLabel);
 
     m_cameraCombo = new QComboBox(central);
     topBar->addWidget(m_cameraCombo, 1);
 
-    topBar->addWidget(new QLabel("RTMP URL:", central));
+    m_languageLabel = new QLabel(central);
+    topBar->addWidget(m_languageLabel);
+
+    m_languageCombo = new QComboBox(central);
+    m_languageCombo->addItem("English");
+    m_languageCombo->addItem("中文");
+    m_languageCombo->setCurrentIndex(AppLocale::toUiIndex(AppLocale::Language::English));
+    topBar->addWidget(m_languageCombo);
+
+    m_urlLabel = new QLabel(central);
+    topBar->addWidget(m_urlLabel);
     m_rtmpUrlEdit = new QLineEdit(central);
-    m_rtmpUrlEdit->setPlaceholderText("rtmp://127.0.0.1/live/stream");
     topBar->addWidget(m_rtmpUrlEdit, 2);
 
-    m_startButton = new QPushButton("开始推流", central);
-    m_stopButton = new QPushButton("停止推流", central);
+    m_startButton = new QPushButton(central);
+    m_stopButton = new QPushButton(central);
     topBar->addWidget(m_startButton);
     topBar->addWidget(m_stopButton);
 
@@ -123,7 +141,6 @@ void MainWindow::buildUi()
     m_previewLabel->setMinimumHeight(360);
     m_previewLabel->setAlignment(Qt::AlignCenter);
     m_previewLabel->setStyleSheet("background: #111; color: #ddd;");
-    m_previewLabel->setText("等待摄像头画面...");
     rootLayout->addWidget(m_previewLabel, 1);
 
     m_logView = new QTextEdit(central);
@@ -138,6 +155,8 @@ void MainWindow::setupConnections()
 {
     connect(m_cameraCombo, &QComboBox::currentIndexChanged,
             this, &MainWindow::onCameraSelectionChanged);
+    connect(m_languageCombo, &QComboBox::currentIndexChanged,
+        this, &MainWindow::onLanguageChanged);
     connect(m_startButton, &QPushButton::clicked,
             this, &MainWindow::onStartClicked);
     connect(m_stopButton, &QPushButton::clicked,
@@ -163,4 +182,18 @@ void MainWindow::setStreamingControls(bool running)
     m_startButton->setEnabled(!running);
     m_stopButton->setEnabled(running);
     m_cameraCombo->setEnabled(!running);
+}
+
+void MainWindow::applyLanguage()
+{
+    const bool zh = (m_language == AppLocale::Language::Chinese);
+
+    setWindowTitle(zh ? "RTMP 摄像头推流器" : "RTMP Camera Pusher");
+    m_cameraLabel->setText(zh ? "摄像头:" : "Camera:");
+    m_languageLabel->setText(zh ? "语言:" : "Language:");
+    m_urlLabel->setText("RTMP URL:");
+    m_rtmpUrlEdit->setPlaceholderText("rtmp://127.0.0.1/live/stream");
+    m_startButton->setText(zh ? "开始推流" : "Start");
+    m_stopButton->setText(zh ? "停止推流" : "Stop");
+    m_previewLabel->setText(zh ? "等待摄像头画面..." : "Waiting for camera preview...");
 }

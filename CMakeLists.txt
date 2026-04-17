@@ -36,6 +36,8 @@ pkg_check_modules(FFMPEG IMPORTED_TARGET libavformat libavcodec libavutil libsws
 
 # Shared core library (no QWidget dependency)
 add_library(${PROJECT_NAME}-core
+    src/common/AppLocale.cpp
+    src/common/AppLocale.h
     src/core/StreamSession.cpp
     src/core/StreamSession.h
     src/streaming/RtmpStreamer.cpp

@@ -10,6 +10,7 @@
 #include <QLineEdit>
 #include <QPixmap>
 #include <QPushButton>
+#include <QSettings>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -20,17 +21,20 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1080, 720);
 
     buildUi();
+    loadPersistentSettings();
     m_session = new StreamSession(this);
 
     setupConnections();
     applyLanguage();
     refreshCameraDevices();
     setStreamingControls(false);
-    appendLog("Application started. Select a camera and start streaming.");
+    appendLog("应用已启动，等待选择摄像头并开始推流。");
 }
 
 MainWindow::~MainWindow()
 {
+    savePersistentSettings();
+
     if (m_session != nullptr && m_session->isStreaming()) {
         m_session->stopStreaming();
     }
@@ -47,7 +51,6 @@ void MainWindow::onCameraListChanged(const QStringList& cameras)
     m_cameraCombo->addItems(cameras);
 
     if (cameras.isEmpty()) {
-        appendLog("No available camera devices were detected.");
         return;
     }
 
@@ -77,6 +80,7 @@ void MainWindow::onLanguageChanged(int index)
     m_language = AppLocale::fromUiIndex(index);
     AppLocale::apply(m_language);
     applyLanguage();
+    savePersistentSettings();
 }
 
 void MainWindow::onStartClicked()
@@ -161,7 +165,8 @@ void MainWindow::setupConnections()
             this, &MainWindow::onStartClicked);
     connect(m_stopButton, &QPushButton::clicked,
             this, &MainWindow::onStopClicked);
-
+    connect(m_rtmpUrlEdit, &QLineEdit::editingFinished,
+            this, [this]() { savePersistentSettings(); });
     connect(m_session, &StreamSession::cameraListChanged,
             this, &MainWindow::onCameraListChanged);
     connect(m_session, &StreamSession::previewFrameReady,
@@ -196,4 +201,24 @@ void MainWindow::applyLanguage()
     m_startButton->setText(zh ? "开始推流" : "Start");
     m_stopButton->setText(zh ? "停止推流" : "Stop");
     m_previewLabel->setText(zh ? "等待摄像头画面..." : "Waiting for camera preview...");
+}
+
+void MainWindow::loadPersistentSettings()
+{
+    QSettings settings;
+    const int savedLanguage = settings.value("gui/language", AppLocale::toUiIndex(AppLocale::Language::English)).toInt();
+    m_language = AppLocale::fromUiIndex(savedLanguage);
+    AppLocale::apply(m_language);
+    m_languageCombo->setCurrentIndex(AppLocale::toUiIndex(m_language));
+
+    const QString defaultUrl = QStringLiteral("");
+    const QString savedUrl = settings.value("gui/rtmpUrl", defaultUrl).toString().trimmed();
+    m_rtmpUrlEdit->setText(savedUrl.isEmpty() ? defaultUrl : savedUrl);
+}
+
+void MainWindow::savePersistentSettings() const
+{
+    QSettings settings;
+    settings.setValue("gui/language", AppLocale::toUiIndex(m_language));
+    settings.setValue("gui/rtmpUrl", m_rtmpUrlEdit->text().trimmed());
 }

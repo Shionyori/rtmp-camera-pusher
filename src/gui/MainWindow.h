@@ -36,6 +36,8 @@ private:
     void startPreviewForIndex(int index);
     void setStreamingControls(bool running);
     void applyLanguage();
+    void loadPersistentSettings();
+    void savePersistentSettings() const;
 
     QLabel* m_cameraLabel = nullptr;
     QLabel* m_languageLabel = nullptr;
